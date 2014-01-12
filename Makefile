@@ -13,7 +13,7 @@ CFLAGS = -Wall -O2
 
 all: $(gio_PROGRAM) 
 
-TARGET_DIR=.
+TARGET_DIR=/p/lscratche/sato5/gio
 
 test: $(gio_PROGRAM)	
 #	-srun rm $(TARGET_DIR)/gio-file.* 2> /tmp/null 1> /tmp/null

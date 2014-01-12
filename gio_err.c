@@ -60,11 +60,11 @@ void gio_dbg(const char* fmt, ...) {
 
 void gio_print(const char* fmt, ...) {
   va_list argp;
-  fprintf(DEBUG_STDOUT, "GIO:%s:%d: ", hostname, rank);
+  fprintf(stdout, "GIO:%s:%d: ", hostname, rank);
   va_start(argp, fmt);
-  vfprintf(DEBUG_STDOUT, fmt, argp);
+  vfprintf(stdout, fmt, argp);
   va_end(argp);
-  fprintf(DEBUG_STDOUT, "\n");
+  fprintf(stdout, "\n");
   return;
 }
 
