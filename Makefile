@@ -16,9 +16,10 @@ all: $(gio_PROGRAM)
 TARGET_DIR=.
 
 test: $(gio_PROGRAM)	
-	-srun rm $(TARGET_DIR)/gio.* 2>&1 /dev/null
+#	-srun rm $(TARGET_DIR)/gio-file.* 2> /tmp/null 1> /tmp/null
 #	srun  -n 4 ./$(gio_PROGRAM) -e sw -s w -f 1048576 -d /tmp
-	srun  -n 4 ./$(gio_PROGRAM) -e pw -s w -f 1048576 -d $(TARGET_DIR)
+	srun  -n 4 ./$(gio_PROGRAM) -e pw -s w -f 1048576 -d $(TARGET_DIR) -m 4
+	srun  -n 4 ./$(gio_PROGRAM) -e pr -s w -f 1048576 -d $(TARGET_DIR) -m 4
 
 $(gio_PROGRAM): $(gio_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
@@ -27,5 +28,13 @@ $(gio_PROGRAM): $(gio_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -c $<
 
 .PHONY: clean
+clean-all: clean gclean
+
 clean:
 	-rm -rf $(PROGRAMS) $(OBJS)
+
+gclean:
+	-rm -rf ./*.core
+
+dclean:
+	-rm -rf ./gio-file.*

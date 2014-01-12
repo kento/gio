@@ -23,13 +23,14 @@ double get_dtime(void);
 void usage(void);
 void get_rank_path(char *mypath);
 void get_coll_io_path(char *mypath, int comm_size);
-int* create_write_data(int start_val);
-void free_write_data(int *wdata);
+
+int* create_io_data(int start_val);
+void free_io_data(int *wdata);
+int  validate_io_data(int *data, int val);
 
 void do_sequential_read();
 void do_sequential_write();
 void do_experiment();
-
 
 
 static struct option option_table[] = {
@@ -37,6 +38,7 @@ static struct option option_table[] = {
   {"s", required_argument, 0, 0},
   {"f", required_argument, 0, 0},
   {"d", required_argument, 0, 0},
+  {"m", required_argument, 0, 0},
   {0, 0, 0, 0}
 };
 
@@ -51,6 +53,8 @@ int    data_size_on = 0;
 size_t data_size = 0;
 char target_path[PATH_LEN];
 int  target_path_on = 0;
+int  m_size_on = 0; /*M of NxM*/
+int  m_size = 0;
 
 
 int main(int argc,char *argv[])
@@ -91,6 +95,8 @@ int main(int argc,char *argv[])
       case 3:
 	strcpy(target_path, optarg);
 	target_path_on = 1;
+      case 4:
+	m_size = atoi(optarg);
 	break;
       default:
 	gio_dbg("Unknown option\n");
@@ -112,6 +118,13 @@ int main(int argc,char *argv[])
     exit(EXIT_SUCCESS);
   }
 
+  if (strcmp(expr, "pw") == 0) {
+    if (m_size == 0) {
+      usage();
+      exit(EXIT_SUCCESS);
+    }
+  }
+
   do_experiment();
 
   MPI_Finalize(); 
@@ -120,35 +133,58 @@ int main(int argc,char *argv[])
 
 char *striping_factor = "4";
 char *striping_unit = "1048576";
-long local_size = 1048576L;
-int sub_comm_count = 2;
 
-void get_sub_collective_io_comm(MPI_Comm *sub_comm)
+
+int get_sub_collective_io_comm(MPI_Comm *sub_comm)
 {
   int sub_comm_size, sub_comm_color;
 
   /* Construct sub collective I/O communicater 
      according to group_count
    */
-  if (world_comm_size % sub_comm_count != 0) {
-    gio_err("world_comm_size:%d can not be divided by sub_comm_count:%d (%s:%s:%d)", 
-	    world_comm_size, sub_comm_count, __FILE__, __func__, __LINE__);
+  if (world_comm_size % m_size != 0) {
+    gio_err("world_comm_size:%d can not be divided by m_size:%d (%s:%s:%d)", 
+	    world_comm_size, m_size, __FILE__, __func__, __LINE__);
   }
-  sub_comm_size = world_comm_size / sub_comm_count;
+  sub_comm_size = world_comm_size / m_size;
   sub_comm_color = myrank / sub_comm_size;
   MPI_Comm_split(MPI_COMM_WORLD, sub_comm_color, myrank, sub_comm);
-  return;
+  return sub_comm_color;
 }
 
-int* create_write_data(int val)
+int validate_io_data(int *data, int val)
+{
+  int i;
+  int int_count;
+
+  int_count = data_size / sizeof(int);
+  for (i = 0; i < int_count; i++) {
+    if (data[i] != val) {
+      gio_err("data is not validated at index %d. Value:%d is expected, but is %d (%s:%s:%d)", 
+	      i, val, data[i], __FILE__, __func__, __LINE__);
+      return 0;
+    }
+    /* if (i % (int_count / 5) == 0) { */
+    /*   gio_dbg("index:%d - value:%d == %d", i, data[i], val); */
+    /* } */
+  }  
+  return 1;  
+}
+
+int* create_io_data(int val)
 {
   int *wdata;
   int int_count;
   int i;
 
-  wdata = (int*)gio_malloc(local_size);  
+  if (data_size % sizeof(int) != 0) {
+    gio_err("data_size:%d must be divided by %d bytes (%s:%s:%d)", 
+	    data_size, sizeof(int), __FILE__, __func__, __LINE__);
+  }
 
-  int_count = local_size / sizeof(int);
+  wdata = (int*)gio_malloc(data_size);  
+
+  int_count = data_size / sizeof(int);
   for (i = 0; i < int_count; i++) {
     wdata[i] = val;
   }
@@ -156,7 +192,7 @@ int* create_write_data(int val)
   return wdata;
 }
 
-void free_write_data(int *wdata)
+void free_io_data(int *wdata)
 {
   gio_free(wdata);
   return;
@@ -169,16 +205,16 @@ void do_collective_write()
   MPI_Comm sub_write_comm;
   MPI_File fh;
   char coll_path[PATH_LEN];
-  int sub_comm_size = 0, sub_rank;
+  int sub_comm_size, sub_rank, sub_comm_color;
   int disp;
   int rc;
   int *buf;
 
-  get_sub_collective_io_comm(&sub_write_comm);  
+  sub_comm_color = get_sub_collective_io_comm(&sub_write_comm);  
 
   /* Construct a datatype for distributing the input data across all
    * processes. */
-  MPI_Type_contiguous(local_size / sizeof(int), MPI_INT, &contig);
+  MPI_Type_contiguous(data_size / sizeof(int), MPI_INT, &contig);
   MPI_Type_commit(&contig);
   
   /* Set the stripe_count and stripe_size, that is, the striping_factor                                                                                                                                    
@@ -192,14 +228,14 @@ void do_collective_write()
 
   /* Get path to the target file of the communicator */
   MPI_Comm_size(sub_write_comm, &sub_comm_size);
-  get_coll_io_path(coll_path, sub_comm_size);
+  get_coll_io_path(coll_path, sub_comm_color);
 
   /* Delete the output file if it exists so that striping can be set                                                                                                                                          * on the output file. */
-  rc = MPI_File_delete(coll_path, info);
+  //  rc = MPI_File_delete(coll_path, info);
 
   /* Create write data*/
   MPI_Comm_rank(sub_write_comm, &sub_rank);
-  buf = create_write_data(sub_rank * sub_comm_size);
+  buf = create_io_data(sub_rank);
 
 
   MPI_Barrier(MPI_COMM_WORLD);
@@ -211,13 +247,14 @@ void do_collective_write()
   if (rc != MPI_SUCCESS) {
     gio_err("MPI_File_open failed  (%s:%s:%d)", __FILE__, __func__, __LINE__);
   }
-  
-  /* Set the file view for the output file. In this example, we will                                                                                                                                          * use the same contiguous datatype as we used for reading the data                                                                                                                                         * into local memory. A better example would be to write out just                                                                                                                                           * part of the data, say 4 contiguous elements followed by a gap of                                                                                                                                         * 4 elements, and repeated. */
-  disp = myrank * local_size * sizeof(int);
+
+  /* Set the file view for the output file. In this example, we will                                                                                                                                          * use the same contiguous datatype as we used for reading the data                                                                                                                                          * into local memory. A better example would be to write out just                                                                                                                                            * part of the data, say 4 contiguous elements followed by a gap of                                                                                                                                          * 4 elements, and repeated. */
+  disp = sub_rank * data_size;
   MPI_File_set_view(fh, disp, contig, contig, "native", info);
   if (rc != MPI_SUCCESS) {
     gio_err("MPI_File_set_view failed  (%s:%s:%d)", __FILE__, __func__, __LINE__);
   }
+
 
   /* MPI Collective Write */
   rc = MPI_File_write_all(fh, buf, 1, contig, MPI_STATUS_IGNORE);
@@ -226,7 +263,7 @@ void do_collective_write()
   }
 
   /*Free data*/
-  free_write_data(buf);
+  free_io_data(buf);
 
   /* Close Files */
   MPI_File_close(&fh);
@@ -235,6 +272,75 @@ void do_collective_write()
 
 void do_collective_read()
 {
+  MPI_Info info;
+  MPI_Datatype contig;
+  MPI_Comm sub_read_comm;
+  MPI_File fh;
+  char coll_path[PATH_LEN];
+  int sub_comm_size, sub_rank, sub_comm_color;
+  int disp;
+  int rc;
+  int *buf;
+
+  sub_comm_color = get_sub_collective_io_comm(&sub_read_comm);  
+
+  /* Construct a datatype for distributing the input data across all
+   * processes. */
+  MPI_Type_contiguous(data_size / sizeof(int), MPI_INT, &contig);
+  MPI_Type_commit(&contig);
+  
+  /* Set the stripe_count and stripe_size, that is, the striping_factor                                                                                                                                    
+   * and striping_unit. Both keys and values for MPI_Info_set must be                                                                                                                                      
+   * in the form of ascii strings. */
+  MPI_Info_create(&info);
+  //  MPI_Info_set(info, "striping_factor", striping_factor);
+  //  MPI_Info_set(info, "striping_unit", striping_unit);
+  MPI_Info_set(info, "romio_cb_read", "enable");                                                                                                                                                       
+  //  MPI_Info_set(info, "romio_cb_read", "disable");
+
+  /* Get path to the target file of the communicator */
+  MPI_Comm_size(sub_read_comm, &sub_comm_size);
+  get_coll_io_path(coll_path, sub_comm_color);
+
+  /* Delete the output file if it exists so that striping can be set                                                                                                                                          * on the output file. */
+  //  rc = MPI_File_delete(coll_path, info);
+
+  /* Create read data*/
+  MPI_Comm_rank(sub_read_comm, &sub_rank);
+  buf = create_io_data(-1);
+
+  MPI_Barrier(MPI_COMM_WORLD);
+
+  /* Open the file */
+  rc = MPI_File_open(sub_read_comm, coll_path, 
+		     MPI_MODE_RDONLY, 
+		     info, &fh);
+  if (rc != MPI_SUCCESS) {
+    gio_err("MPI_File_open failed: %s  (%s:%s:%d)", coll_path, __FILE__, __func__, __LINE__);
+  }
+
+  /* Set the file view for the output file. In this example, we will                                                                                                                                          * use the same contiguous datatype as we used for reading the data                                                                                                                                          * into local memory. A better example would be to read out just                                                                                                                                            * part of the data, say 4 contiguous elements followed by a gap of                                                                                                                                          * 4 elements, and repeated. */
+  disp = sub_rank * data_size;
+  MPI_File_set_view(fh, disp, contig, contig, "native", info);
+  if (rc != MPI_SUCCESS) {
+    gio_err("MPI_File_set_view failed  (%s:%s:%d)", __FILE__, __func__, __LINE__);
+  }
+
+
+  /* MPI Collective Read */
+  rc = MPI_File_read_all(fh, buf, 1, contig, MPI_STATUS_IGNORE);
+  if (rc != MPI_SUCCESS) {
+    gio_err("MPI_File_set_view failed  (%s:%s:%d)", __FILE__, __func__, __LINE__);
+  }
+
+  validate_io_data(buf, sub_rank);
+
+  /*Free data*/
+  free_io_data(buf);
+
+  /* Close Files */
+  MPI_File_close(&fh);
+  return;
 }
 
 
@@ -269,13 +375,13 @@ void do_sequential_write()
 
 void get_rank_path(char *mypath)
 {
-  sprintf(mypath, "%s/gio.%d.%d", target_path, myrank, getpid());
+  sprintf(mypath, "%s/gio-file..%d.%d", target_path, myrank, getpid());
   return;
 }
 
-void get_coll_io_path(char *mypath, int comm_size)
+void get_coll_io_path(char *mypath, int comm_color)
 {
-  sprintf(mypath, "%s/gio.coll.%d.%d", target_path, comm_size, myrank);
+  sprintf(mypath, "%s/gio-file.coll.%d.%d", target_path, comm_color, m_size);
   return;
 }
 
