@@ -382,6 +382,7 @@ void get_rank_path(char *mypath)
 void get_coll_io_path(char *mypath, int comm_color)
 {
   sprintf(mypath, "%s/gio-file.coll.%d.%d", target_path, comm_color, m_size);
+
   return;
 }
 
