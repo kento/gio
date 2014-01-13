@@ -544,6 +544,8 @@ void do_sequential_read()
 void do_experiment()
 {
   if (myrank == 0) {
+    int sf = max_striping_factor / m_size;
+    if (sf == 0) sf = 1;
     gio_print("===============================================");
     gio_print("Experiment          : %s", expr);
     gio_print("Scale               : %s", scale);
@@ -552,6 +554,7 @@ void do_experiment()
     gio_print("# of processes      : %d", world_comm_size);
     gio_print("# of files          : %d", m_size);
     gio_print("max_striping_factor : %d", max_striping_factor);
+    gio_print("striping_factor     : %d", sf);
     gio_print("striping_unit       : %s", striping_unit);
   }
   MPI_Barrier(MPI_COMM_WORLD);
