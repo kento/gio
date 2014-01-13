@@ -18,6 +18,7 @@
 #define OPT_LEN (32)
 #define PATH_LEN (256)
 
+#define GIO_LARGE_FILE
 
 double get_dtime(void);
 void usage(void);
@@ -49,17 +50,18 @@ struct perf_times {
 };
 
 static struct perf_times ptimes[] = {
-  {"total_time", 0, 0},     //0
-  {"init_time", 0, 0},      //1
-  {"open_time", 0, 0},      //2
+  {"total_time   ", 0, 0},     //0
+  {"init_time    ", 0, 0},      //1
+  {"open_time    ", 0, 0},      //2
   {"set_view_time", 0, 0},  //3
-  {"write_time", 0, 0},     //4
-  {"close_time", 0, 0}      //5
+  {"io_time      ", 0, 0},     //4
+  {"close_time   ", 0, 0}      //5
 };
 
 int myrank;
 int world_comm_size;
 
+/*Configurable value*/
 int  expr_on = 0;
 char expr[OPT_LEN];
 int  scale_on = 0;
@@ -71,6 +73,12 @@ int  target_path_on = 0;
 int  m_size_on = 0; /*M of NxM*/
 int  m_size = 0;
 
+/*Static value, which can not be changed*/
+int max_striping_factor = 80; // if we use over 64 oss, deleting file operation hangs.
+char striping_factor[8];
+//char *striping_unit =   "67108864"; //  64MB
+char *striping_unit =  "134217728";   // 128MB
+//char *striping_unit =  "536870912"; // 512MB
 
 int main(int argc,char *argv[])
 {
@@ -146,8 +154,46 @@ int main(int argc,char *argv[])
   return 0;
 }
 
-char *striping_factor = "4";
-char *striping_unit = "1048576";
+void print_results()
+{
+  struct perf_times *gathered_ptimes = NULL;
+  int i, j;
+
+  /*Gather elapesd time */
+  if (myrank == 0) {
+    gathered_ptimes = (struct perf_times*)gio_malloc(sizeof(ptimes) * world_comm_size);
+  }
+
+  MPI_Gather(ptimes, sizeof(ptimes), MPI_BYTE, 
+	     gathered_ptimes, sizeof(ptimes), MPI_BYTE,
+	     0, MPI_COMM_WORLD);
+
+  if (myrank == 0) {
+    for (i = 0; i < world_comm_size; i++) {
+      struct perf_times *output_ptimes = &gathered_ptimes[i * sizeof(ptimes)/sizeof(struct perf_times)];
+      gio_print("-----------------------------------------------");
+      gio_print("rank: %d", i);
+      gio_print("        \tStart    \tEnd      \tElapsed");
+      for (j = 0; j < sizeof(ptimes)/sizeof(struct perf_times); j++) {
+
+	gio_print("%s\t%f\t%f\t%f", 
+		  ptimes[j].name,
+		  output_ptimes[j].start,
+		  output_ptimes[j].end,
+		    output_ptimes[j].end - output_ptimes[j].start
+		  );
+      }
+    }
+  }
+
+  if (myrank == 0) {
+    gio_free(gathered_ptimes);
+  }
+  return;
+}
+
+
+
 
 
 int get_sub_collective_io_comm(MPI_Comm *sub_comm)
@@ -193,7 +239,7 @@ int* create_io_data(int val)
   int i;
 
   if (data_size % sizeof(int) != 0) {
-    gio_err("data_size:%d must be divided by %d bytes (%s:%s:%d)", 
+    gio_err("data_size:%d must be divided by integer size (%d bytes) (%s:%s:%d)", 
 	    data_size, sizeof(int), __FILE__, __func__, __LINE__);
   }
 
@@ -221,16 +267,21 @@ void do_collective_write()
   MPI_File fh;
   char coll_path[PATH_LEN];
   int sub_comm_size, sub_rank, sub_comm_color;
+  int striping_factor_int;
   int disp;
   int rc;
   int *buf;
-  int i, j;
-  struct perf_times *gathered_ptimes = NULL;
 
 
   ptimes[0].start = MPI_Wtime();
   ptimes[1].start = MPI_Wtime();
-  sub_comm_color = get_sub_collective_io_comm(&sub_write_comm);  
+  //  if (m_size == 1) {
+  //    sub_write_comm = MPI_COMM_WORLD;
+  //    sub_comm_color = 0;
+  //  } else {
+    sub_comm_color = get_sub_collective_io_comm(&sub_write_comm);  
+    //  }
+
   /* Construct a datatype for distributing the input data across all
    * processes. */
   MPI_Type_contiguous(data_size / sizeof(int), MPI_INT, &contig);
@@ -240,9 +291,12 @@ void do_collective_write()
    * and striping_unit. Both keys and values for MPI_Info_set must be                                                                                                                                      
    * in the form of ascii strings. */
   MPI_Info_create(&info);
+  striping_factor_int = max_striping_factor / m_size;
+  if (striping_factor_int == 0) striping_factor_int = 1;
+  sprintf(striping_factor, "%d", striping_factor_int);
   MPI_Info_set(info, "striping_factor", striping_factor);
   MPI_Info_set(info, "striping_unit", striping_unit);
-  MPI_Info_set(info, "romio_cb_write", "enable");                                                                                                                                                       
+  //  MPI_Info_set(info, "romio_cb_write", "enable");                                                                                                                                                       
   //  MPI_Info_set(info, "romio_cb_write", "disable");
 
   /* Get path to the target file of the communicator */
@@ -255,31 +309,46 @@ void do_collective_write()
   /* Create write data*/
   MPI_Comm_rank(sub_write_comm, &sub_rank);
   buf = create_io_data(sub_rank);
+  /* if (sub_rank == 0) { */
+  /*   rc = MPI_File_delete(coll_path, MPI_INFO_NULL); */
+  /*   if (rc != MPI_SUCCESS) { */
+  /*     gio_err("MPI_File_delete failed  (%s:%s:%d)", __FILE__, __func__, __LINE__); */
+  /*   } */
+  /* } */
   ptimes[1].end = MPI_Wtime();
 
   MPI_Barrier(MPI_COMM_WORLD);
 
-
   /* Open the file */
+  //  gio_dbg("start ***********************");  
   ptimes[2].start = MPI_Wtime();
   rc = MPI_File_open(sub_write_comm, coll_path, 
 		     MPI_MODE_WRONLY | MPI_MODE_CREATE, 
 		     info, &fh);
+
   ptimes[2].end = MPI_Wtime();
 
   if (rc != MPI_SUCCESS) {
     gio_err("MPI_File_open failed  (%s:%s:%d)", __FILE__, __func__, __LINE__);
   }
 
-
+  //  gio_dbg("start *********************** %d", sub_rank);  
   ptimes[3].start = MPI_Wtime();
   /* Set the file view for the output file. In this example, we will                                                                                                                                          * use the same contiguous datatype as we used for reading the data                                                                                                                                          * into local memory. A better example would be to write out just                                                                                                                                            * part of the data, say 4 contiguous elements followed by a gap of                                                                                                                                          * 4 elements, and repeated. */
   disp = sub_rank * data_size;
+#ifdef GIO_LARGE_FILE
+  int i;
+  for (i = 0; i < sub_rank; i++) {
+    MPI_File_seek(fh, data_size, MPI_SEEK_CUR);
+  }
+#else  
   MPI_File_set_view(fh, disp, contig, contig, "native", info);
+#endif
   if (rc != MPI_SUCCESS) {
     gio_err("MPI_File_set_view failed  (%s:%s:%d)", __FILE__, __func__, __LINE__);
   }
   ptimes[3].end = MPI_Wtime();
+  //  gio_dbg("end ***********************");  
 
   /* MPI Collective Write */
   ptimes[4].start = MPI_Wtime();
@@ -297,37 +366,9 @@ void do_collective_write()
   MPI_File_close(&fh);
   ptimes[5].end = MPI_Wtime();
   ptimes[0].end = MPI_Wtime();
-  
-  /*Gather elapesd time */
-  if (myrank == 0) {
-    gathered_ptimes = (struct perf_times*)gio_malloc(sizeof(ptimes) * world_comm_size);
-  }
 
-  MPI_Gather(ptimes, sizeof(ptimes), MPI_BYTE, 
-	     gathered_ptimes, sizeof(ptimes), MPI_BYTE,
-	     0, MPI_COMM_WORLD);
+  print_results();
 
-  if (myrank == 0) {
-    for (i = 0; i < world_comm_size; i++) {
-      struct perf_times *output_ptimes = &gathered_ptimes[i * sizeof(ptimes)/sizeof(struct perf_times)];
-      gio_print("-----------------------------------------------");
-      gio_print("rank: %d", i);
-      gio_print("        \tStart    \tEnd      \tElapsed");
-      for (j = 0; j < sizeof(ptimes)/sizeof(struct perf_times); j++) {
-
-	gio_print("%s\t%f\t%f\t%f", 
-		  ptimes[j].name,
-		  output_ptimes[j].start,
-		  output_ptimes[j].end,
-		  output_ptimes[j].end - output_ptimes[j].start
-		  );
-      }
-    }
-  }
-
-  if (myrank == 0) {
-    gio_free(gathered_ptimes);
-  }
   return;
 }
 
@@ -343,6 +384,8 @@ void do_collective_read()
   int rc;
   int *buf;
 
+  ptimes[0].start = MPI_Wtime();
+  ptimes[1].start = MPI_Wtime();
   sub_comm_color = get_sub_collective_io_comm(&sub_read_comm);  
 
   /* Construct a datatype for distributing the input data across all
@@ -369,30 +412,43 @@ void do_collective_read()
   /* Create read data*/
   MPI_Comm_rank(sub_read_comm, &sub_rank);
   buf = create_io_data(-1);
+  ptimes[1].end = MPI_Wtime();
 
   MPI_Barrier(MPI_COMM_WORLD);
 
   /* Open the file */
+  ptimes[2].start = MPI_Wtime();
   rc = MPI_File_open(sub_read_comm, coll_path, 
 		     MPI_MODE_RDONLY, 
 		     info, &fh);
   if (rc != MPI_SUCCESS) {
     gio_err("MPI_File_open failed: %s  (%s:%s:%d)", coll_path, __FILE__, __func__, __LINE__);
   }
+  ptimes[2].end   = MPI_Wtime();
 
   /* Set the file view for the output file. In this example, we will                                                                                                                                          * use the same contiguous datatype as we used for reading the data                                                                                                                                          * into local memory. A better example would be to read out just                                                                                                                                            * part of the data, say 4 contiguous elements followed by a gap of                                                                                                                                          * 4 elements, and repeated. */
+  ptimes[3].start = MPI_Wtime();
+#ifdef GIO_LARGE_FILE
+  int i;
+  for (i = 0; i < sub_rank; i++) {
+    MPI_File_seek(fh, data_size, MPI_SEEK_CUR);
+  }
+#else  
   disp = sub_rank * data_size;
   MPI_File_set_view(fh, disp, contig, contig, "native", info);
+#endif
   if (rc != MPI_SUCCESS) {
     gio_err("MPI_File_set_view failed  (%s:%s:%d)", __FILE__, __func__, __LINE__);
   }
-
+  ptimes[3].end = MPI_Wtime();
 
   /* MPI Collective Read */
+  ptimes[4].start = MPI_Wtime();
   rc = MPI_File_read_all(fh, buf, 1, contig, MPI_STATUS_IGNORE);
   if (rc != MPI_SUCCESS) {
     gio_err("MPI_File_set_view failed  (%s:%s:%d)", __FILE__, __func__, __LINE__);
   }
+  ptimes[4].end = MPI_Wtime();
 
   validate_io_data(buf, sub_rank);
 
@@ -400,7 +456,13 @@ void do_collective_read()
   free_io_data(buf);
 
   /* Close Files */
+  ptimes[5].start = MPI_Wtime();
   MPI_File_close(&fh);
+  ptimes[5].end = MPI_Wtime();
+  ptimes[0].end = MPI_Wtime();
+
+  print_results();
+
   return;
 }
 
@@ -483,7 +545,14 @@ void do_experiment()
 {
   if (myrank == 0) {
     gio_print("===============================================");
-    gio_print("local_data_size: %d", data_size);
+    gio_print("Experiment          : %s", expr);
+    gio_print("Scale               : %s", scale);
+    gio_print("local_data_size     : %d", data_size);
+    gio_print("Target path         : %s", target_path);
+    gio_print("# of processes      : %d", world_comm_size);
+    gio_print("# of files          : %d", m_size);
+    gio_print("max_striping_factor : %d", max_striping_factor);
+    gio_print("striping_unit       : %s", striping_unit);
   }
   MPI_Barrier(MPI_COMM_WORLD);
   if (strcmp(expr, "sw") == 0) {

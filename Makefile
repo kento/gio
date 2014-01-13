@@ -13,13 +13,13 @@ CFLAGS = -Wall -O2
 
 all: $(gio_PROGRAM) 
 
-TARGET_DIR=/p/lscratche/sato5/gio
+TARGET_DIR=/p/lscratchc/sato5/gio
 
 test: $(gio_PROGRAM)	
-#	-srun rm $(TARGET_DIR)/gio-file.* 2> /tmp/null 1> /tmp/null
+	-rm $(TARGET_DIR)/gio-file.*
 #	srun  -n 4 ./$(gio_PROGRAM) -e sw -s w -f 1048576 -d /tmp
-	srun  -n 4 ./$(gio_PROGRAM) -e pw -s w -f 1048576 -d $(TARGET_DIR) -m 4
-	srun  -n 4 ./$(gio_PROGRAM) -e pr -s w -f 1048576 -d $(TARGET_DIR) -m 4
+	srun  -n 96 ./$(gio_PROGRAM) -e pw -s w -f 536870912 -d $(TARGET_DIR) -m 1
+#	srun  -n 24 ./$(gio_PROGRAM) -e pr -s w -f 536870912 -d $(TARGET_DIR) -m 1
 
 $(gio_PROGRAM): $(gio_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
